@@ -262,10 +262,10 @@ end
     @test_throws ArgumentError timedwait(() -> true, 0, pollint=1e-4)
 
     duration = @elapsed timedwait(() -> false, 1)  # Using default pollint of 0.1
-    @test duration ≈ 1 atol=0.2
+    @test duration ≈ 1 atol=0.25
 
     duration = @elapsed timedwait(() -> false, 0; pollint=1)
-    @test duration ≈ 1 atol=0.2
+    @test duration ≈ 1 atol=0.25
 end
 
 @testset "timedwait on multiple channels" begin
