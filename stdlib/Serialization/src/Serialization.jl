@@ -22,7 +22,8 @@ mutable struct Serializer{I<:IO} <: AbstractSerializer
     table::IdDict{Any,Any}
     pending_refs::Vector{Int}
     known_object_data::Dict{UInt64,Any}
-    Serializer{I}(io::I) where I<:IO = new(io, 0, IdDict(), Int[], Dict{UInt64,Any}())
+    version::Int # version of data may be != ser_version !
+    Serializer{I}(io::I) where I<:IO = new(io, 0, IdDict(), Int[], Dict{UInt64,Any}(), 0)
 end
 
 Serializer(io::IO) = Serializer{typeof(io)}(io)
@@ -77,7 +78,7 @@ const TAGS = Any[
 
 @assert length(TAGS) == 255
 
-const ser_version = 10 # do not make changes without bumping the version #!
+const ser_version = 11 # do not make changes without bumping the version #!
 
 const NTAGS = length(TAGS)
 
@@ -654,6 +655,16 @@ function serialize_any(s::AbstractSerializer, @nospecialize(x))
     nothing
 end
 
+function stream_flags()
+    endianness = (ENDIAN_BOM == 0x04030201 ? 0 :
+                  ENDIAN_BOM == 0x01020304 ? 1 :
+                  error("unsupported endianness in serializer"))
+    machine = (sizeof(Int) == 4 ? 0 :
+               sizeof(Int) == 8 ? 1 :
+               error("unsupported word size in serializer"))
+    UInt8(endianness) | (UInt8(machine) << 2)
+end
+
 """
     Serialization.writeheader(s::AbstractSerializer)
 
@@ -674,15 +685,32 @@ function writeheader(s::AbstractSerializer)
     writetag(io, HEADER_TAG)
     write(io, "JL")  # magic bytes
     write(io, UInt8(ser_version))
-    endianness = (ENDIAN_BOM == 0x04030201 ? 0 :
-                  ENDIAN_BOM == 0x01020304 ? 1 :
-                  error("unsupported endianness in serializer"))
-    machine = (sizeof(Int) == 4 ? 0 :
-               sizeof(Int) == 8 ? 1 :
-               error("unsupported word size in serializer"))
-    write(io, UInt8(endianness) | (UInt8(machine) << 2))
+    write(io, UInt8(stream_flags()))
     write(io, [0x00,0x00,0x00]) # 3 reserved bytes
     nothing
+end
+
+function readheader(s::AbstractSerializer)
+    # Tag already read
+    io = s.io
+    m1 = read(io, UInt8)
+    m2 = read(io, UInt8)
+    if m1 != UInt8('J') || m2 != UInt8('L')
+        error("Unsupported serialization format (got header magic bytes $m1 $m2)")
+    end
+    version    = read(io, UInt8)
+    flags      = read(io, UInt8)
+    reserved1  = read(io, UInt8)
+    reserved2  = read(io, UInt8)
+    reserved3  = read(io, UInt8)
+    if flags != stream_flags()
+        error("Unsupported serialization format (stream flags $flags do not match current machine)")
+    end
+    if version > ser_version
+        error("""Cannot read stream serialized with a newer version of Julia.
+                 Got data version $version > current version $ser_version""")
+    end
+    s.version = version
 end
 
 """
@@ -843,9 +871,7 @@ function handle_deserialize(s::AbstractSerializer, b::Int32)
     elseif b == LONGSYMBOL_TAG
         return deserialize_symbol(s, Int(read(s.io, Int32)::Int32))
     elseif b == HEADER_TAG
-        for _ = 1:7
-            read(s.io, UInt8)
-        end
+        readheader(s)
         return deserialize(s)
     elseif b == INT8_TAG
         return read(s.io, Int8)
@@ -1054,7 +1080,9 @@ function deserialize(s::AbstractSerializer, ::Type{CodeInfo})
             ci.max_world = reinterpret(UInt, deserialize(s))
         end
     end
-    ci.hide_in_stacktrace = deserialize(s)
+    if s.version >= 11
+        ci.hide_in_stacktrace = deserialize(s)
+    end
     ci.inferred = deserialize(s)
     ci.inlineable = deserialize(s)
     ci.propagate_inbounds = deserialize(s)
